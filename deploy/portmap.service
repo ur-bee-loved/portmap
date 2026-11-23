@@ -1,0 +1,55 @@
+# portmap as a service that serves the page to the local network.
+#
+# deploy/install.sh installs this file with your user, the checkout's folder
+# and the port filled in. To copy it by hand instead, change User=, the
+# /home/pi/portmap paths and PORTMAP_PORT first.
+
+[Unit]
+Description=portmap: switch-port, patch-panel and desk map
+After=network.target
+
+[Service]
+Type=notify
+User=pi
+Environment=PORTMAP_HOST=0.0.0.0
+Environment=PORTMAP_PORT=8765
+ExecStart=/usr/bin/python3 /home/pi/portmap/server.py
+Restart=on-failure
+RestartSec=5
+
+# The page has no login: accept connections only from this machine and from
+# private (LAN) addresses, whatever the firewall says. For a VPN such as
+# Tailscale, add its range with "sudo systemctl edit portmap":
+#   [Service]
+#   IPAddressAllow=100.64.0.0/10
+IPAddressAllow=localhost link-local 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+IPAddressDeny=any
+
+# Sandbox: the code is read-only and data/ (network.json and backups/) is the
+# only writable folder. Files it creates there are readable by User= only.
+UMask=0077
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/portmap/data
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

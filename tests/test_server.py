@@ -1,5 +1,10 @@
 import copy
 import json
+import os
+import re
+import signal
+import socket
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -151,3 +156,35 @@ def test_store_loads_an_old_data_file_as_current(tmp_path):
     doc, source = srv.Store(path, tmp_path / "none.json").load()
     assert (source, doc["version"], doc["revision"]) == ("data", 2, 5)
     assert srv.validate(doc) == []
+
+
+def test_sd_notify_does_nothing_outside_systemd(monkeypatch):
+    monkeypatch.delenv("NOTIFY_SOCKET", raising=False)
+    srv.sd_notify("READY=1")
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="needs Unix sockets")
+def test_runs_as_a_systemd_notify_service(tmp_path):
+    """READY=1 once it is listening; SIGTERM (systemctl stop) exits 0 after STOPPING=1."""
+    notify = tmp_path / "notify"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        sock.bind(str(notify))
+        sock.settimeout(10)
+        proc = subprocess.Popen(
+            [sys.executable, str(APP / "server.py"), "--host", "127.0.0.1", "--port", "0", "-q",
+             "--data", str(tmp_path / "network.json")],
+            env={**os.environ, "NOTIFY_SOCKET": str(notify)}, stderr=subprocess.PIPE, text=True)
+        try:
+            ready = sock.recv(4096).decode()
+            assert ready.startswith("READY=1\nSTATUS=listening on 127.0.0.1:")
+            port = int(re.search(r":(\d+),", ready).group(1))
+            status, _, body = request(f"http://127.0.0.1:{port}/")
+            assert status == 200 and b"<title>Portmap</title>" in body
+
+            proc.send_signal(signal.SIGTERM)
+            assert proc.wait(timeout=10) == 0
+            assert sock.recv(4096) == b"STOPPING=1"
+        finally:
+            proc.kill()
+            stderr = proc.communicate()[1]
+    assert "Traceback" not in stderr and "Ctrl-C" not in stderr

@@ -94,6 +94,46 @@ changed there. A port or position in the default state is not stored.
   you to reload, so nothing is overwritten silently.
 - `-h`/`--h`/`--help`, `-V`/`--version`. Environment: `PORTMAP_HOST`,
   `PORTMAP_PORT`, `PORTMAP_DATA`.
+- Under systemd (`Type=notify`) it tells systemd once it is listening and
+  stops cleanly on `systemctl stop`, letting a save in progress finish.
+
+## Raspberry Pi (systemd service)
+
+To keep it running on a Pi (or any Linux machine with systemd) and open it
+from other devices on the network:
+
+```sh
+git clone <this repository> ~/portmap       # on the Pi, as your normal user
+scp data/network.json pi@raspberrypi.local:portmap/data/   # optional: bring your data
+cd ~/portmap && sudo deploy/install.sh      # [--port 8765]
+```
+
+`install.sh` installs `deploy/portmap.service` with your user, the
+checkout's folder and the port filled in, enables it and starts it. The
+service listens on all interfaces (`0.0.0.0`), starts on boot and restarts if
+it crashes. If `ufw` or `firewalld` is active, the port is opened there. At
+the end the script prints the addresses to open, e.g.
+`http://raspberrypi.local:8765/`. Re-running it is safe and keeps the
+installed port unless `--port` is given.
+
+- **Who can connect:** only the Pi itself and private LAN addresses
+  (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), enforced by systemd
+  (`IPAddressAllow`) whatever the firewall says, since the page has no login.
+  For a VPN range (Tailscale is `100.64.0.0/10`), run
+  `sudo systemctl edit portmap` and add `[Service]` / `IPAddressAllow=100.64.0.0/10`.
+- **Sandbox:** it runs as your user, straight from the checkout, but can
+  write only to `data/`; the files it creates there are readable by you only.
+  Moving the data elsewhere with `PORTMAP_DATA` needs a matching
+  `ReadWritePaths=` in the unit.
+- **Port:** 1024 or above (the service has no root rights).
+
+| task | command |
+|---|---|
+| status, address and data file | `systemctl status portmap` |
+| follow the log | `journalctl -u portmap -f` |
+| update after `git pull` | `sudo systemctl restart portmap` |
+| change the port | `sudo deploy/install.sh --port 8080` |
+| remove the service (keeps `data/`) | `sudo deploy/install.sh --uninstall` |
 
 ## Spreadsheet import
 
@@ -184,6 +224,7 @@ server.py            HTTP server, atomic save + backups
 schema.py            data model: states, validation, upgrade of older files
 import_xlsx.py       spreadsheet -> data/network.json
 data/                network.example.json (committed), network.json + backups/ (ignored)
+deploy/              portmap.service (systemd unit) and install.sh
 web/index.html
 web/css/theme.css    colors, fonts, sizes (tokens)
 web/css/app.css      layout and components

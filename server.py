@@ -6,6 +6,9 @@ GET /api/network and saves it with PUT /api/network. Each save must carry the
 revision it was based on; a stale revision gets HTTP 409 so two open tabs
 cannot silently overwrite each other. Files from an older version are
 upgraded when loaded (schema.py) and written in the new format on the next save.
+
+Under systemd (deploy/portmap.service, Type=notify) it reports when it is
+listening and stops cleanly on SIGTERM.
 """
 
 import argparse
@@ -13,6 +16,8 @@ import datetime as dt
 import json
 import mimetypes
 import os
+import signal
+import socket
 import sys
 import tempfile
 import threading
@@ -44,6 +49,30 @@ def die(msg, code=1):
 
 def utc_stamp():
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def sd_notify(state):
+    """Send state lines ("READY=1", "STATUS=...") to systemd when it started us
+    with Type=notify. Does nothing otherwise."""
+    addr = os.environ.get("NOTIFY_SOCKET", "")
+    if not addr.startswith(("/", "@")):
+        return
+    if addr[0] == "@":
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(addr)
+            sock.sendall(state.encode("utf-8"))
+    except OSError as exc:
+        print(f"{PROG}: warning: cannot notify systemd: {exc}", file=sys.stderr)
+
+
+class Terminated(Exception):
+    """Raised in the main thread on SIGTERM, which is how systemd stops a service."""
+
+
+def raise_terminated(signum, frame):
+    raise Terminated
 
 
 class Store:
@@ -214,19 +243,28 @@ def main(argv=None):
         server = ThreadingHTTPServer((args.host, args.port), make_handler(store, WEB_DIR, args.quiet))
     except OSError as exc:
         die(f"cannot listen on {args.host}:{args.port}: {exc.strerror or exc}")
-    host = "localhost" if args.host in ("127.0.0.1", "0.0.0.0", "::") else args.host
-    url = f"http://{host}:{server.server_address[1]}/"
+    port = server.server_address[1]
+    wildcard = args.host in ("", "0.0.0.0", "::")
+    host = "localhost" if wildcard or args.host == "127.0.0.1" else args.host
+    url = f"http://{host}:{port}/"
     source = "data" if store.path.exists() else "example (no data file yet)"
-    print(f"{PROG} {VERSION}: {url}  data: {store.path} [{source}]  Ctrl-C to stop", file=sys.stderr)
+    print(f"{PROG} {VERSION}: {url}{' (all interfaces)' if wildcard else ''}  data: {store.path} [{source}]"
+          f"{'  Ctrl-C to stop' if sys.stderr.isatty() else ''}", file=sys.stderr)
     if args.open:
         webbrowser.open(url)
     try:
+        signal.signal(signal.SIGTERM, raise_terminated)
+        sd_notify(f"READY=1\nSTATUS=listening on {args.host or '0.0.0.0'}:{port}, data {store.path}")
         server.serve_forever()
     except KeyboardInterrupt:
         print(file=sys.stderr)
         return 130
+    except Terminated:
+        return 0
     finally:
+        sd_notify("STOPPING=1")
         server.server_close()
+        store.lock.acquire()  # let a save in progress finish; none starts after this
     return 0
 
 
